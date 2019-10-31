@@ -70,6 +70,8 @@ const uint16_t srxlCRCTable[] =
 };
 #endif
 
+#define SRXL_TELEM_SUPPRESS_MAX (100)
+
 /// PUBLIC VARIABLES ///
 
 SrxlChannelData srxlChData = {0, 0, 0, {0}};
@@ -81,9 +83,11 @@ SrxlVtxData srxlVtxData = {0, 0, 1, 0, 0, 1};
 SrxlDevice srxlThisDev = {0};
 SrxlBus srxlBus[SRXL_NUM_OF_BUSES];
 bool srxlChDataIsFailsafe = false;
+bool srxlTelemetryPhase = false;
 uint32_t srxlFailsafeChMask = 0;  // Tracks all active channels for use during failsafe transmission
 SrxlBindData srxlBindInfo = {0, 0, 0, 0};
 SrxlReceiverStats srxlRx = {0};
+uint16_t srxlTelemSuppressCount = 0;
 
 #ifdef SRXL_INCLUDE_FWD_PGM_CODE
 SrxlFullID srxlFwdPgmDevice = {0, 0};  // Device that should accept Forward Programming connection by default
@@ -261,7 +265,7 @@ static inline SrxlRcvrEntry* srxlChooseTelemRcvr(void)
         return srxlRx.rcvrSorted[0];
 
     // If we were previously sending telemetry
-    if(srxlRx.pTelemRcvr)
+    if(srxlRx.pTelemRcvr && srxlRx.pTelemRcvr->channelMask)
     {
         // If the current choice is not full-range
         if((srxlRx.pTelemRcvr->info & SRXL_DEVINFO_TELEM_FULL_RANGE) == 0)
@@ -495,22 +499,32 @@ void srxlSend(SrxlBus* pBus, SRXL_CMD srxlCmd, uint8_t replyID)
     else if(srxlCmd == SRXL_CMD_CHANNEL || srxlCmd == SRXL_CMD_CHANNEL_FS)
     {
         pBus->srxlOut.header.packetType = SRXL_CTRL_ID;
-        pBus->srxlOut.control.payload.cmd =
-            (srxlCmd == SRXL_CMD_CHANNEL) ? SRXL_CTRL_CMD_CHANNEL : SRXL_CTRL_CMD_CHANNEL_FS;
+        uint32_t channelMask;
+        if(srxlCmd == SRXL_CMD_CHANNEL)
+        {
+            pBus->srxlOut.control.payload.cmd = SRXL_CTRL_CMD_CHANNEL;
+            pBus->srxlOut.control.payload.replyID = replyID;
 
-        // In failsafe mode, we dont want a telemetry reply
-        pBus->srxlOut.control.payload.replyID = (srxlCmd == SRXL_CMD_CHANNEL) ? replyID : 0;
+            channelMask = srxlChData.mask;
+        }
+        else // == SRXL_CMD_CHANNEL_FS
+        {
+            // In failsafe mode, we dont want a telemetry reply
+            pBus->srxlOut.control.payload.cmd = SRXL_CTRL_CMD_CHANNEL_FS;
+            pBus->srxlOut.control.payload.replyID = 0;
 
-        // Clear telemetry buffer when we request it so we don't repeatedly display old data
-        if(pBus->srxlOut.control.payload.replyID)
-            srxlTelemData.sensorID = srxlTelemData.secondaryID = 0;
+            channelMask = srxlFailsafeChMask;
+        }
 
         // Set signal quality info (only a bus master sends this, so assume srxlChData contains the latest values)
         pBus->srxlOut.control.payload.channelData.rssi = srxlChData.rssi;
-        pBus->srxlOut.control.payload.channelData.frameLosses = srxlChData.frameLosses;
+#ifdef SRXL_IS_HUB
+        pBus->srxlOut.control.payload.channelData.frameLosses = srxlRx.frameLosses;
+#else
+        pBus->srxlOut.control.payload.channelData.frameLosses = srxlRx.rcvr[0].fades;
+#endif
 
         uint8_t channelIndex = 0;
-        uint32_t channelMask = (srxlCmd == SRXL_CMD_CHANNEL) ? srxlChData.mask : srxlFailsafeChMask;
         uint32_t channelMaskBit = 1;
         for(uint8_t i = 0; i < 32; ++i, channelMaskBit <<= 1)
         {
@@ -581,6 +595,14 @@ void srxlSend(SrxlBus* pBus, SRXL_CMD srxlCmd, uint8_t replyID)
             pBus->srxlOut.telemetry.destDevID = 0xFF;
         }
         memcpy(pBus->srxlOut.telemetry.payload.raw, srxlTelemData.raw, sizeof(srxlTelemData));
+#ifdef SRXL_INCLUDE_MASTER_CODE
+        if(srxlRx.pTelemRcvr && (pBus->srxlOut.telemetry.destDevID == srxlRx.pTelemRcvr->deviceID))
+        {
+            srxlTelemetrySent();
+            // Clear telemetry buffer after sending so we don't repeatedly display old data
+            srxlTelemData.sensorID = srxlTelemData.secondaryID = 0;
+        }
+#endif
     }
     else if(srxlCmd == SRXL_CMD_ENTER_BIND)
     {
@@ -589,7 +611,7 @@ void srxlSend(SrxlBus* pBus, SRXL_CMD srxlCmd, uint8_t replyID)
         pBus->srxlOut.bind.request = SRXL_BIND_REQ_ENTER;
         pBus->srxlOut.bind.deviceID = replyID;
         pBus->srxlOut.bind.data.type = DSMX_11MS;
-        pBus->srxlOut.bind.data.options = SRXL_BIND_OPT_TELEM_TX_ENABLE | SRXL_BIND_OPT_BIND_TX_ENABLE;
+        pBus->srxlOut.bind.data.options = (replyID != 0xFF) ? SRXL_BIND_OPT_TELEM_TX_ENABLE | SRXL_BIND_OPT_BIND_TX_ENABLE : 0;
         pBus->srxlOut.bind.data.guid = 0;
         pBus->srxlOut.bind.data.uid = 0;
     }
@@ -712,41 +734,22 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
             srxlChData.frameLosses = pCtrlData->channelData.frameLosses;
             if(pBus->pMasterRcvr)
             {
-                pBus->pMasterRcvr->rssi = pCtrlData->channelData.rssi;
+                if(pCtrlData->channelData.rssi < 0)
+                {
+                    pBus->pMasterRcvr->rssi_dBm = pCtrlData->channelData.rssi;
+                    pBus->pMasterRcvr->rssiRcvd |= RSSI_RCVD_DBM;
+                }
+                else
+                {
+                    pBus->pMasterRcvr->rssi_Pct = pCtrlData->channelData.rssi;
+                    pBus->pMasterRcvr->rssiRcvd |= RSSI_RCVD_PCT;
+                }
+                // If the receiver is sending alternating dBm/%, then use that as phase
+                if(pBus->pMasterRcvr->rssiRcvd == RSSI_RCVD_BOTH)
+                    srxlTelemetryPhase = pCtrlData->channelData.rssi < 0;
                 pBus->pMasterRcvr->fades = pCtrlData->channelData.frameLosses;
                 pBus->pMasterRcvr->channelMask = isFailsafe ? 0 : pCtrlData->channelData.mask;
                 srxlRx.rxBusBits |= pBus->pMasterRcvr->busBits;
-            }
-
-            // When we receive serial data from all bus masters, update frame losses and holds
-            if((srxlRx.rxBusBits & SRXL_ALL_BUSES) == SRXL_ALL_BUSES)
-            {
-                srxlRx.rxBusBits = 0;
-
-                uint8_t i;
-                for(i = 0; i < srxlRx.rcvrCount; ++i)
-                {
-                    if(srxlRx.rcvr[i].channelMask)
-                    {
-                        srxlRx.lossCountdown = 45;
-                        break;
-                    }
-                }
-                if(i = srxlRx.rcvrCount)
-                {
-                    if(srxlRx.lossCountdown)
-                    {
-                        if(--srxlRx.lossCountdown == 0)
-                        {
-                            ++srxlRx.holds;
-                            srxlRx.frameLosses -= 45;
-                        }
-                        else
-                        {
-                            ++srxlRx.frameLosses;
-                        }
-                    }
-                }
             }
 
             // Only save received channel values to srxlChData if it's normal channel data or we're in a hold condition
@@ -815,6 +818,7 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
             pBus->requestID = pBus->fullID.deviceID;
             pBus->state = SrxlState_SendHandshake;
             pBus->master = true;
+            pBus->pMasterRcvr = &srxlRx.rcvr[0];
         }
 
         // Add this device to our list of discovered devices
@@ -916,12 +920,14 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
         else if(pBindInfo->deviceID == pBus->fullID.deviceID || pBindInfo->deviceID == 0xFF)
         {
             // Check for Enter Bind Mode (only valid if sent to a specific receiver)
-            if(pBindInfo->request == SRXL_BIND_REQ_ENTER && pBindInfo->deviceID < 0x30)
+            if(pBindInfo->request == SRXL_BIND_REQ_ENTER)
             {
 #ifdef SRXL_INCLUDE_MASTER_CODE
                 srxlBindInfo.type = pBindInfo->data.type;
                 srxlBindInfo.options = pBindInfo->data.options;
-                srxlTryToBind(srxlBindInfo.type, srxlBindInfo.options, 0);
+                srxlBindInfo.guid = 0;
+                srxlBindInfo.uid = 0;
+                srxlTryToBind(srxlBindInfo);
 #endif
             }
             else if(pBindInfo->request == SRXL_BIND_REQ_STATUS && srxlThisDev.pRcvr)
@@ -932,13 +938,10 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
             // Handle set bind info request
             else if(pBindInfo->request == SRXL_BIND_REQ_SET_BIND)
             {
-                srxlBindInfo.type = pBindInfo->data.type;
-                srxlBindInfo.options = pBindInfo->data.options;
-                srxlBindInfo.guid = pBindInfo->data.guid;
-                srxlBindInfo.uid = pBindInfo->data.uid;
+                srxlBindInfo = pBindInfo->data;
 #ifdef SRXL_INCLUDE_MASTER_CODE
-                if(pBindInfo->deviceID < 0x30)
-                    srxlTryToBind(srxlBindInfo.type, srxlBindInfo.options, srxlBindInfo.guid);
+                if(pBus->fullID.deviceID < 0x30)
+                    srxlTryToBind(srxlBindInfo);
 #endif
             }
         }
@@ -953,30 +956,40 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
         // NOTE: This data should be sent by exactly one telemetry device in response to a bus master request,
         //       so it is safe to update the global pTelemRcvr here even though this is a bus-specific function.
 
-        // If the incoming telemetry is destined for us, then we need to figure out who should send it over RF
         SrxlTelemetryPacket* pTelem = &(pRx->telemetry);
-        if(pTelem->destDevID == srxlThisDev.devEntry.deviceID)
-        {
-            memcpy(&srxlTelemData, &pTelem->payload, sizeof(srxlTelemData));
-            srxlRx.pTelemRcvr = srxlChooseTelemRcvr();
-        }
         // If the telemetry destination is set to broadcast, that indicates a request to re-handshake
-        else if(pBus->master && pTelem->destDevID == 0xFF)
+        if(pBus->master && pTelem->destDevID == 0xFF)
         {
             // If the master only found one device, don't poll again -- just tell the requesting device who we are
             pBus->requestID = pBus->rxDevCount > 1 ? srxlThisDev.devEntry.deviceID : 0xFF;
             pBus->state = SrxlState_SendHandshake;
         }
-        // Otherwise turn off our telemetry and that of any receivers we might reply to via our own telemetry
+        // If the incoming telemetry is destined for us, then we need to figure out who should send it over RF
+        else if(pTelem->destDevID == srxlThisDev.devEntry.deviceID)
+        {
+            memcpy(&srxlTelemData, &pTelem->payload, sizeof(srxlTelemData));
+            // This needs different logic for hubs versus endpoints
+#ifdef SRXL_IS_HUB
+            if(srxlRx.pTelemRcvr == 0)
+            {
+                srxlRx.pTelemRcvr = srxlChooseTelemRcvr();
+            }
+#else
+            srxlRx.pTelemRcvr = srxlThisDev.pRcvr;
+#endif
+            // Enable this device's telemetry tx based on whether we are the chosen telemetry receiver
+            srxlSetTelemetryTxEnable(srxlRx.pTelemRcvr && (srxlRx.pTelemRcvr == srxlThisDev.pRcvr));
+        }
+        // Else turn off our telemetry and that of any receivers we might reply to via our own telemetry
         else
         {
             srxlRx.pTelemRcvr = 0;
+#ifdef SRXL_INCLUDE_MASTER_CODE
+            srxlSetTelemetryTxEnable(false);
+#endif
         }
 
-#ifdef SRXL_INCLUDE_MASTER_CODE
-        // Enable this device's telemetry tx based on whether we are the chosen telemetry receiver
-        srxlSetTelemetryTxEnable(srxlRx.pTelemRcvr && (srxlRx.pTelemRcvr == srxlThisDev.pRcvr));
-#endif
+        srxlTelemSuppressCount = 0;
         break;
     }
     default:
@@ -1028,6 +1041,13 @@ void srxlRun(uint8_t busIndex, int16_t timeoutDelta_ms)
                 pBus->baudRate = SRXL_BAUD_115200;
                 pBus->timeoutCount_ms = 0;
                 pBus->requestID = 0;  // Change back to 0 to indicate unprompted handshake from slave device
+                if(pBus->pMasterRcvr)
+                {
+                    pBus->pMasterRcvr->channelMask = 0;
+                    pBus->pMasterRcvr->fades = 0xFFFF;
+                    pBus->pMasterRcvr->rssi_Pct = 0;
+                    pBus->pMasterRcvr->rssi_dBm = -1;
+                }
                 pBus->state = SrxlState_ListenOnStartup;
             }
         }
@@ -1061,8 +1081,15 @@ void srxlRun(uint8_t busIndex, int16_t timeoutDelta_ms)
         }
         case SrxlState_SendEnterBind:
         {
-            if(srxlRx.pBindRcvr)
+            if(srxlRx.pBindRcvr && (srxlRx.pBindRcvr != srxlThisDev.pRcvr))
+            {
                 srxlSend(pBus, SRXL_CMD_ENTER_BIND, srxlRx.pBindRcvr->deviceID);
+            }
+            else
+            {
+                srxlBindInfo.options = 0;
+                srxlSend(pBus, SRXL_CMD_ENTER_BIND, 0xFF);
+            }
             pBus->state = SrxlState_Running;
             break;
         }
@@ -1097,12 +1124,17 @@ void srxlRun(uint8_t busIndex, int16_t timeoutDelta_ms)
     @brief  Tell the "best" receiver to enter bind mode, either locally or via SRXL command
 
     @param  bindType: One of the possible bind status types to use when binding -- NOTE: The transmitter may ignore this
+    @param  broadcast: True if this is a local request that should tell all connected receivers to enter bind
     @return bool: True if a receiver was told to enter bind mode; else false
 */
-bool srxlEnterBind(uint8_t bindType)
+bool srxlEnterBind(uint8_t bindType, bool broadcast)
 {
     srxlRx.pBindRcvr = 0;
-    if(srxlRx.pTelemRcvr)
+    if(broadcast && srxlThisDev.pRcvr)
+    {
+        srxlRx.pBindRcvr = srxlThisDev.pRcvr;
+    }
+    else if(srxlRx.pTelemRcvr)
     {
         srxlRx.pBindRcvr = srxlRx.pTelemRcvr;
     }
@@ -1117,10 +1149,20 @@ bool srxlEnterBind(uint8_t bindType)
         // Local bind
         if(srxlRx.pBindRcvr == srxlThisDev.pRcvr)
         {
-            uint8_t options = SRXL_BIND_OPT_BIND_TX_ENABLE;
+            srxlBindInfo.type = bindType;
+            srxlBindInfo.options = SRXL_BIND_OPT_BIND_TX_ENABLE;
+            srxlBindInfo.guid = 0;
+            srxlBindInfo.uid = 0;
             if(srxlRx.pBindRcvr == srxlRx.pTelemRcvr)
-                options |= SRXL_BIND_OPT_TELEM_TX_ENABLE;
-            srxlTryToBind(bindType, options, 0);
+                srxlBindInfo.options |= SRXL_BIND_OPT_TELEM_TX_ENABLE;
+            srxlTryToBind(srxlBindInfo);
+            if(broadcast)
+            {
+                for(uint8_t b = 0; b < SRXL_NUM_OF_BUSES; ++b)
+                {
+                    srxlBus[b].txFlags.enterBind = 1;
+                }
+            }
             return true;
         }
 #endif // SRXL_INCLUDE_MASTER_CODE
@@ -1144,25 +1186,26 @@ bool srxlEnterBind(uint8_t bindType)
 
     @param  bindType: Type of bind requested for this receiver or all receivers
     @param  guid: Transmitter GUID to bind the receiver to
+    @param  uid: Unique ID provided by transmitter upon initial bind (can be 0 if unknown)
     @return bool: True if bind info was successfully set for the destination device; else false
 */
-bool srxlSetBindInfo(uint8_t bindType, uint64_t guid)
+bool srxlSetBindInfo(uint8_t bindType, uint64_t guid, uint32_t uid)
 {
     if(guid == 0)
         return false;
 
     // Set bind info, with options defaulted to 0
     srxlBindInfo.type = bindType;
-    srxlBindInfo.options = 0;
+    srxlBindInfo.options = SRXL_BIND_OPT_US_POWER; // Request US power, with no guarantee it's supported
     srxlBindInfo.guid = guid;
-    srxlBindInfo.uid = srxlThisDev.uid;
+    srxlBindInfo.uid = uid ? uid : srxlThisDev.uid;
 
 #ifdef SRXL_INCLUDE_MASTER_CODE
     // If we are a receiver
     if(srxlThisDev.pRcvr)
     {
         // Bind locally, which will result in no further packets since options == 0
-        srxlTryToBind(bindType, 0, guid);
+        srxlTryToBind(srxlBindInfo);
     }
 #endif
 
@@ -1266,4 +1309,90 @@ bool srxlSetVtxData(SrxlVtxData* pVtxData)
     }
 
     return true;
+}
+
+void srxlSetHoldThreshold(uint8_t countdownReset)
+{
+    srxlRx.lossHoldCount = (countdownReset > 1) ? countdownReset : 45;
+}
+
+void srxlClearCommStats(void)
+{
+    srxlRx.holds = 0;
+    srxlRx.frameLosses = 0;
+    srxlRx.lossCountdown = srxlRx.lossHoldCount + 1;
+}
+
+// Return true on failsafe hold
+bool srxlUpdateCommStats(bool isFade)
+{
+    srxlRx.rxBusBits = 0;
+    if(srxlTelemetryPhase)
+    {
+        srxlRx.bestRssi_dBm = -128;
+        srxlRx.bestRssi_Pct = 0;
+    }
+
+    uint8_t i;
+    for(i = 0; i < srxlRx.rcvrCount; ++i)
+    {
+        if(srxlRx.rcvr[i].channelMask)
+        {
+            srxlRx.lossCountdown = srxlRx.lossHoldCount + 1;
+
+            if((srxlRx.rcvr[i].rssiRcvd & RSSI_RCVD_DBM) && srxlRx.bestRssi_dBm < srxlRx.rcvr[i].rssi_dBm)
+                srxlRx.bestRssi_dBm = srxlRx.rcvr[i].rssi_dBm;
+            if((srxlRx.rcvr[i].rssiRcvd & RSSI_RCVD_PCT) && srxlRx.bestRssi_dBm < srxlRx.rcvr[i].rssi_Pct)
+                srxlRx.bestRssi_Pct = srxlRx.rcvr[i].rssi_Pct;
+        }
+    }
+
+    // Set RSSI based on telemetry phase and type of telemetry received
+    srxlChData.rssi = srxlTelemetryPhase ? srxlRx.bestRssi_Pct : srxlRx.bestRssi_dBm;
+
+    // Update flight log frame losses and holds
+    if(isFade && srxlRx.lossCountdown)
+    {
+        if(--srxlRx.lossCountdown == 0)
+        {
+            ++srxlRx.holds;
+            srxlRx.frameLosses -= srxlRx.lossHoldCount;
+        }
+        else
+        {
+            ++srxlRx.frameLosses;
+        }
+    }
+
+    static uint8_t telemFadeCount = 0;
+    // If we are allowed to send telemetry by the device downstream (i.e. any slave device)
+    if(srxlRx.pTelemRcvr)
+    {
+        if(srxlRx.pTelemRcvr->channelMask == 0 || (srxlRx.pTelemRcvr->info & SRXL_DEVINFO_TELEM_FULL_RANGE) == 0)
+        {
+            // If our telemetry receiver missed channel data 3 frames in a row, switch
+            if(++telemFadeCount > 3)
+            {
+                srxlRx.pTelemRcvr = srxlChooseTelemRcvr();
+                srxlSetTelemetryTxEnable(srxlRx.pTelemRcvr && (srxlRx.pTelemRcvr == srxlThisDev.pRcvr));
+                telemFadeCount = 0;
+            }
+        }
+        else
+        {
+            telemFadeCount = 0;
+        }
+    }
+#ifdef SRXL_INCLUDE_MASTER_CODE
+    // Else check to make sure we're still supposed to suppress telemetry (reset countdown when slave tells us not to send again)
+    else if(++srxlTelemSuppressCount > SRXL_TELEM_SUPPRESS_MAX)
+    {
+        // Enable this device's telemetry tx since we stopped being told not to
+        srxlRx.pTelemRcvr = srxlThisDev.pRcvr;
+        srxlSetTelemetryTxEnable(srxlRx.pTelemRcvr);
+    }
+#endif
+
+    // Return true while we're in hold condition (failsafe)
+    return srxlRx.lossCountdown == 0;
 }

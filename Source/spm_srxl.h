@@ -113,6 +113,7 @@ static const uint8_t SRXL_DEFAULT_ID_OF_TYPE[16] =
 #define SRXL_BIND_OPT_NONE              (0x00)
 #define SRXL_BIND_OPT_TELEM_TX_ENABLE   (0x01)  // Set if this device should be enabled as the current telemetry device to tx over RF
 #define SRXL_BIND_OPT_BIND_TX_ENABLE    (0x02)  // Set if this device should reply to a bind request with a Discover packet over RF
+#define SRXL_BIND_OPT_US_POWER          (0x04)  // Set if this device should request US transmit power levels instead of EU
 
 // Current Bind Status
 typedef enum
@@ -397,6 +398,11 @@ extern SrxlVtxData srxlVtxData;
 #define SRXL_CRC_OPTIMIZE_MODE  SRXL_CRC_OPTIMIZE_SPEED
 #endif
 
+#define RSSI_RCVD_NONE  (0)
+#define RSSI_RCVD_DBM   (1)
+#define RSSI_RCVD_PCT   (2)
+#define RSSI_RCVD_BOTH  (3)
+
 // Internal types
 typedef enum
 {
@@ -415,13 +421,14 @@ typedef enum
 //#ifdef SRXL_IS_HUB
 typedef struct SrxlRcvrEntry
 {
-    uint8_t     deviceID;   // SRXL device ID of the receiver
-    uint8_t     busBits;    // Supports 8 buses, with each bit corresponding to busIndex (bit 0 = bus 0, bit 7 = bus 7)
-    uint8_t     info;       // Info bits reported during handshake - See SRXL_DEVINFO_XXX mask bits in header
-    int8_t      rssi;       // Latest RSSI value reported by receiver
-    uint16_t    fades;      // Latest number of fades reported for a given receiver
-    uint32_t    channelMask;  // Latest channel mask for channels provided in channel data packet (0 during fade)
-    uint16_t    fadeCounter;  // Increment for each consecutive fade (i.e. each non-failsafe packet with channelMask == 0)
+    uint8_t     deviceID;       // SRXL device ID of the receiver
+    uint8_t     busBits;        // Supports 8 buses, with each bit corresponding to busIndex (bit 0 = bus 0, bit 7 = bus 7)
+    uint8_t     info;           // Info bits reported during handshake - See SRXL_DEVINFO_XXX mask bits in header
+    uint8_t     rssiRcvd;       // 0 = none, 1 = dBm, 2 = percent, 3 = both dBm and percent
+    int8_t      rssi_dBm;       // Latest RSSI dBm value reported by receiver (negative, varies with receiver type)
+    int8_t      rssi_Pct;       // Latest RSSI percent range estimate reported by receiver (0-100)
+    uint16_t    fades;          // Latest number of fades reported for a given receiver
+    uint32_t    channelMask;    // Latest channel mask for channels provided in channel data packet (0 during fade)
 } SrxlRcvrEntry;
 
 typedef struct SrxlReceiverInfo
@@ -431,8 +438,11 @@ typedef struct SrxlReceiverInfo
     uint8_t         rcvrSortInsert;             // Index into rcvrSorted where full-range telem rcvrs should be inserted
     uint8_t         rcvrCount;                  // Number of entries in rcvr[] and rcvrSorted[]
     uint8_t         rxBusBits;
-    uint8_t         lossCountdown;  // Reset to 45 when frame is good, and decrement for each consecutive
-                                    // frame loss -- when we get to 0, convert 45 frame losses to a hold
+    int8_t          bestRssi_dBm;
+    int8_t          bestRssi_Pct;
+    uint8_t         lossCountdown;  // Reset to lossHoldCount when frame is good, and decrement for each consecutive
+                                    // frame loss -- when we get to 0, convert lossHoldCount frame losses to a hold
+    uint8_t         lossHoldCount;  // Consecutive frame losses required to count as hold
     uint16_t        frameLosses;    // Increment each time all receivers are in frame loss -- if 45
                                     // consecutive, subtract those and increment holds
     uint16_t        holds;          // Increment each time 45 or more consecutive frames are lost (but don't keep
@@ -506,12 +516,15 @@ uint16_t srxlGetTimeoutCount_ms(uint8_t busIndex);
 uint8_t srxlGetDeviceID(uint8_t busIndex);
 bool srxlParsePacket(uint8_t busIndex, uint8_t *packet, uint8_t length);
 void srxlRun(uint8_t busIndex, int16_t timeoutDelta_ms);
-bool srxlEnterBind(uint8_t bindType);
-bool srxlSetBindInfo(uint8_t bindType, uint64_t guid);
+bool srxlEnterBind(uint8_t bindType, bool broadcast);
+bool srxlSetBindInfo(uint8_t bindType, uint64_t guid, uint32_t uid);
 void srxlOnFrameError(uint8_t busIndex);
 SrxlFullID srxlGetTelemetryEndpoint(void);
 bool srxlSetVtxData(SrxlVtxData *pVtxData);
 bool srxlPassThruFwdPgm(uint8_t *pData, uint8_t length);
+void srxlSetHoldThreshold(uint8_t countdownReset);
+void srxlClearCommStats(void);
+bool srxlUpdateCommStats(bool isFade);
 
 #ifdef __cplusplus
 } // extern "C"
