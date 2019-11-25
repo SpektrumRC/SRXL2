@@ -1348,7 +1348,7 @@ bool srxlUpdateCommStats(bool isFade)
     }
 
     // Set RSSI based on telemetry phase and type of telemetry received
-    srxlChData.rssi = srxlTelemetryPhase ? srxlRx.bestRssi_Pct : srxlRx.bestRssi_dBm;
+    srxlChData.rssi = (srxlTelemetryPhase || srxlChDataIsFailsafe) ? srxlRx.bestRssi_Pct : srxlRx.bestRssi_dBm;
 
     // Update flight log frame losses and holds
     if(isFade && srxlRx.lossCountdown)
