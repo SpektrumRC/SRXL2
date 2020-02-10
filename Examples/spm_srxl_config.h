@@ -106,11 +106,12 @@ static inline void srxlSendOnUart(uint8_t uart, uint8_t* pBuffer, uint8_t length
 }
 
 // User-provided callback routine to fill in the telemetry data to send to the master when requested:
-// pTelemetryData - a pointer to the 16-byte global srxlTelemData variable to populate
-// NOTE: srxlTelemData is available as a global variable, so this pointer is only provided
-// as an extra convenience, to allow populating telemetry only when needed.
+// pTelemetryData - a pointer to the 16-byte SrxlTelemetryData transmit buffer to populate
+// NOTE: srxlTelemData is available as a global variable, so the memcpy line commented out below
+// could be used if you would prefer to just populate that with the next outgoing telemetry packet.
 static inline void srxlFillTelemetry(SrxlTelemetryData* pTelemetryData)
 {
+    //memcpy(pTelemetryData, srxlTelemData, sizeof(SrxlTelemetryData));
     userProvidedFillSrxlTelemetry(pTelemetryData);
 }
 

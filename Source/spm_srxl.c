@@ -577,7 +577,7 @@ void srxlSend(SrxlBus* pBus, SRXL_CMD srxlCmd, uint8_t replyID)
     }
     else if(srxlCmd == SRXL_CMD_TELEMETRY)
     {
-        srxlFillTelemetry(&srxlTelemData);
+        srxlFillTelemetry(&pBus->srxlOut.telemetry.payload);
         pBus->srxlOut.header.packetType = SRXL_TELEM_ID;
         pBus->srxlOut.header.length = sizeof(SrxlTelemetryPacket);
         // If we successfully received a handshake from the bus master
@@ -594,13 +594,17 @@ void srxlSend(SrxlBus* pBus, SRXL_CMD srxlCmd, uint8_t replyID)
             // Send 0xFF to tell bus master to re-send the handshake so we know where to direct telemetry in the future
             pBus->srxlOut.telemetry.destDevID = 0xFF;
         }
-        memcpy(pBus->srxlOut.telemetry.payload.raw, srxlTelemData.raw, sizeof(srxlTelemData));
+
 #ifdef SRXL_INCLUDE_MASTER_CODE
         if(srxlRx.pTelemRcvr && (pBus->srxlOut.telemetry.destDevID == srxlRx.pTelemRcvr->deviceID))
         {
-            srxlTelemetrySent();
-            // Clear telemetry buffer after sending so we don't repeatedly display old data
-            srxlTelemData.sensorID = srxlTelemData.secondaryID = 0;
+            // Don't mark telemetry as having been sent if we are sending it ourself over RF
+            if(pBus->srxlOut.telemetry.destDevID != srxlThisDev.pRcvr->deviceID)
+            {
+                srxlTelemetrySent();
+                // Clear telemetry buffer after sending so we don't repeatedly display old data
+//                srxlTelemData.sensorID = srxlTelemData.secondaryID = 0;
+            }
         }
 #endif
     }
@@ -746,7 +750,9 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
                 }
                 // If the receiver is sending alternating dBm/%, then use that as phase
                 if(pBus->pMasterRcvr->rssiRcvd == RSSI_RCVD_BOTH)
-                    srxlTelemetryPhase = pCtrlData->channelData.rssi < 0;
+                {
+                    srxlTelemetryPhase = pCtrlData->channelData.rssi >= 0;
+                }
                 pBus->pMasterRcvr->fades = pCtrlData->channelData.frameLosses;
                 pBus->pMasterRcvr->channelMask = isFailsafe ? 0 : pCtrlData->channelData.mask;
                 srxlRx.rxBusBits |= pBus->pMasterRcvr->busBits;
@@ -957,17 +963,17 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
         //       so it is safe to update the global pTelemRcvr here even though this is a bus-specific function.
 
         SrxlTelemetryPacket* pTelem = &(pRx->telemetry);
+        memcpy(&srxlTelemData, &pTelem->payload, sizeof(srxlTelemData));
         // If the telemetry destination is set to broadcast, that indicates a request to re-handshake
         if(pBus->master && pTelem->destDevID == 0xFF)
         {
             // If the master only found one device, don't poll again -- just tell the requesting device who we are
-            pBus->requestID = pBus->rxDevCount > 1 ? srxlThisDev.devEntry.deviceID : 0xFF;
+            pBus->requestID = pBus->rxDevCount > 1 ? pBus->fullID.deviceID : 0xFF;
             pBus->state = SrxlState_SendHandshake;
         }
         // If the incoming telemetry is destined for us, then we need to figure out who should send it over RF
-        else if(pTelem->destDevID == srxlThisDev.devEntry.deviceID)
+        else if(pTelem->destDevID == pBus->fullID.deviceID)
         {
-            memcpy(&srxlTelemData, &pTelem->payload, sizeof(srxlTelemData));
             // This needs different logic for hubs versus endpoints
 #ifdef SRXL_IS_HUB
             if(srxlRx.pTelemRcvr == 0)
@@ -978,7 +984,9 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
             srxlRx.pTelemRcvr = srxlThisDev.pRcvr;
 #endif
             // Enable this device's telemetry tx based on whether we are the chosen telemetry receiver
+#ifdef SRXL_INCLUDE_MASTER_CODE
             srxlSetTelemetryTxEnable(srxlRx.pTelemRcvr && (srxlRx.pTelemRcvr == srxlThisDev.pRcvr));
+#endif
         }
         // Else turn off our telemetry and that of any receivers we might reply to via our own telemetry
         else
@@ -990,6 +998,9 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
         }
 
         srxlTelemSuppressCount = 0;
+#ifdef SRXL_INCLUDE_MASTER_CODE
+        srxlSuppressInternalTelemetry(&pTelem->payload);
+#endif
         break;
     }
     default:
@@ -1374,7 +1385,9 @@ bool srxlUpdateCommStats(bool isFade)
             if(++telemFadeCount > 3)
             {
                 srxlRx.pTelemRcvr = srxlChooseTelemRcvr();
+#ifdef SRXL_INCLUDE_MASTER_CODE
                 srxlSetTelemetryTxEnable(srxlRx.pTelemRcvr && (srxlRx.pTelemRcvr == srxlThisDev.pRcvr));
+#endif
                 telemFadeCount = 0;
             }
         }
