@@ -80,19 +80,21 @@ SrxlVtxData srxlVtxData = {0, 0, 1, 0, 0, 1};
 
 /// LOCAL VARIABLES ///
 
-SrxlDevice srxlThisDev = {0};
-SrxlBus srxlBus[SRXL_NUM_OF_BUSES];
-bool srxlChDataIsFailsafe = false;
-bool srxlTelemetryPhase = false;
-uint32_t srxlFailsafeChMask = 0;  // Tracks all active channels for use during failsafe transmission
-SrxlBindData srxlBindInfo = {0, 0, 0, 0};
-SrxlReceiverStats srxlRx = {0};
-uint16_t srxlTelemSuppressCount = 0;
+static SrxlDevice srxlThisDev = {0};
+static SrxlBus srxlBus[SRXL_NUM_OF_BUSES];
+static bool srxlChDataIsFailsafe = false;
+static bool srxlTelemetryPhase = false;
+#ifdef SRXL_INCLUDE_MASTER_CODE
+static uint32_t srxlFailsafeChMask = 0;  // Tracks all active channels for use during failsafe transmission
+#endif
+static SrxlBindData srxlBindInfo = {0, 0, 0, 0};
+static SrxlReceiverStats srxlRx = {0};
+static uint16_t srxlTelemSuppressCount = 0;
 
 #ifdef SRXL_INCLUDE_FWD_PGM_CODE
-SrxlFullID srxlFwdPgmDevice = {0, 0};  // Device that should accept Forward Programming connection by default
-uint8_t srxlFwdPgmBuffer[FWD_PGM_MAX_DATA_SIZE] = {0};
-uint8_t srxlFwdPgmBufferLength = 0;
+static SrxlFullID srxlFwdPgmDevice = {0, 0};  // Device that should accept Forward Programming connection by default
+static uint8_t srxlFwdPgmBuffer[FWD_PGM_MAX_DATA_SIZE] = {0};
+static uint8_t srxlFwdPgmBufferLength = 0;
 #endif
 
 // Include additional header and externs if using STM32 hardware acceleration
@@ -185,9 +187,12 @@ static uint16_t srxlCrc16(uint8_t* packet)
         //    Output Data Inversion Mode      = Disable
         //    Input Data Format               = Bytes
         crc = (uint16_t)HAL_CRC_Calculate(&hcrc, (uint32_t*)packet, length);
+#elif(SRXL_CRC_OPTIMIZE_MODE == SRXL_CRC_OPTIMIZE_EXTERNAL)
+        crc = SRXL_CRC_CALCULATE(packet, length, crc);
 #else
         // Default to table-lookup method
-        for(uint8_t i = 0; i < length; ++i)
+        uint8_t i;
+        for(i = 0; i < length; ++i)
         {
             // Get indexed position in lookup table using XOR of current CRC hi byte
             uint8_t pos = (uint8_t)((crc >> 8) ^ packet[i]);
@@ -203,7 +208,8 @@ static uint16_t srxlCrc16(uint8_t* packet)
 static inline SrxlRcvrEntry* srxlGetReceiverEntry(uint8_t busIndex, uint8_t deviceID)
 {
     SrxlRcvrEntry* pRcvr = 0;
-    for(uint8_t i = 0; i < srxlRx.rcvrCount; ++i)
+    uint8_t i;
+    for(i = 0; i < srxlRx.rcvrCount; ++i)
     {
         if((srxlRx.rcvr[i].busBits & (1u << busIndex)) && (srxlRx.rcvr[i].deviceID == deviceID))
         {
@@ -237,7 +243,8 @@ static inline SrxlRcvrEntry* srxlAddReceiverEntry(SrxlBus* pBus, SrxlDevEntry de
         // If this receiver is full-range, insert into our sorted list after the other full-range telemetry receivers
         if(pRcvr->info & SRXL_DEVINFO_TELEM_FULL_RANGE)
         {
-            for(uint8_t n = i; n > srxlRx.rcvrSortInsert; --n)
+            uint8_t n;
+            for(n = i; n > srxlRx.rcvrSortInsert; --n)
                 srxlRx.rcvrSorted[n] = srxlRx.rcvrSorted[n - 1];
             srxlRx.rcvrSorted[(srxlRx.rcvrSortInsert)++] = pRcvr;
         }
@@ -271,7 +278,8 @@ static inline SrxlRcvrEntry* srxlChooseTelemRcvr(void)
         if((srxlRx.pTelemRcvr->info & SRXL_DEVINFO_TELEM_FULL_RANGE) == 0)
         {
             // Then see if there is a full-range choice that received channel data to switch to
-            for(uint8_t i = 0; i < srxlRx.rcvrSortInsert; ++i)
+            uint8_t i;
+            for(i = 0; i < srxlRx.rcvrSortInsert; ++i)
             {
                 if(srxlRx.rcvrSorted[i]->channelMask)
                     return srxlRx.rcvrSorted[i];
@@ -284,7 +292,8 @@ static inline SrxlRcvrEntry* srxlChooseTelemRcvr(void)
     // Else just pick the first one that got channel data this past frame
     else
     {
-        for(uint8_t i = 0; i < srxlRx.rcvrCount; ++i)
+        uint8_t i;
+        for(i = 0; i < srxlRx.rcvrCount; ++i)
         {
             if(srxlRx.rcvrSorted[i]->channelMask)
                 return srxlRx.rcvrSorted[i];
@@ -295,11 +304,12 @@ static inline SrxlRcvrEntry* srxlChooseTelemRcvr(void)
 }
 
 // Return pointer to device entry matching the given ID, or NULL if not found
-SrxlDevEntry* srxlGetDeviceEntry(SrxlBus* pBus, uint8_t deviceID)
+static SrxlDevEntry* srxlGetDeviceEntry(SrxlBus* pBus, uint8_t deviceID)
 {
     if(pBus)
     {
-        for(uint8_t i = 0; i < pBus->rxDevCount; ++i)
+        uint8_t i;
+        for(i = 0; i < pBus->rxDevCount; ++i)
         {
             if(pBus->rxDev[i].deviceID == deviceID)
                 return &(pBus->rxDev[i]);
@@ -309,7 +319,7 @@ SrxlDevEntry* srxlGetDeviceEntry(SrxlBus* pBus, uint8_t deviceID)
 }
 
 // Add an entry to our list of devices found on the SRXL bus (or update an entry if it already exists)
-SrxlDevEntry* srxlAddDeviceEntry(SrxlBus* pBus, SrxlDevEntry devEntry)
+static SrxlDevEntry* srxlAddDeviceEntry(SrxlBus* pBus, SrxlDevEntry devEntry)
 {
     // Don't allow broadcast or unknown device types to be added
     if(!pBus || devEntry.deviceID < 0x10 || devEntry.deviceID > 0xEF)
@@ -477,7 +487,7 @@ uint8_t srxlGetDeviceID(uint8_t busIndex)
     @param  srxlCmd:    Specific type of packet to send
     @param  replyID:    Device ID of the device this Send command is targeting
 */
-void srxlSend(SrxlBus* pBus, SRXL_CMD srxlCmd, uint8_t replyID)
+static void srxlSend(SrxlBus* pBus, SRXL_CMD srxlCmd, uint8_t replyID)
 {
     if(!pBus || !pBus->initialized)
         return;
@@ -763,7 +773,8 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
             {
                 uint8_t channelIndex = 0;
                 uint32_t channelMaskBit = 1;
-                for(uint8_t i = 0; i < 32 && channelMaskBit <= pCtrlData->channelData.mask; ++i, channelMaskBit <<= 1)
+                uint8_t i;
+                for(i = 0; i < 32 && channelMaskBit <= pCtrlData->channelData.mask; ++i, channelMaskBit <<= 1)
                 {
                     if(pCtrlData->channelData.mask & channelMaskBit)
                     {
@@ -829,7 +840,7 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
 
         // Add this device to our list of discovered devices
         SrxlDevEntry newDev = {.deviceID = pHandshake->srcDevID, .priority = pHandshake->priority, .info = pHandshake->info};
-        SrxlDevEntry* pDev = srxlAddDeviceEntry(pBus, newDev);
+        srxlAddDeviceEntry(pBus, newDev);
 
         // Bus master needs to track responses and poll next device
         if(pBus->master)
@@ -898,7 +909,9 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
         if(pBindInfo->request == SRXL_BIND_REQ_BOUND_DATA)
         {
             // Call the user-defined callback -- if returns true, bind all other receivers
-            SrxlFullID boundID = {.deviceID = pBindInfo->deviceID, .busIndex = busIndex};
+            SrxlFullID boundID;
+            boundID.deviceID = pBindInfo->deviceID;
+            boundID.busIndex = busIndex;
             if(srxlOnBind(boundID, pBindInfo->data))
             {
                 // Update the bind info
@@ -914,7 +927,8 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
                 srxlBindInfo.uid = pBindInfo->data.uid;
 
                 // Try to set bind info for all other receivers on other buses to match it
-                for(uint8_t b = 0; b < SRXL_NUM_OF_BUSES; ++b)
+                uint8_t b;
+                for(b = 0; b < SRXL_NUM_OF_BUSES; ++b)
                 {
                     if(b == busIndex)
                         continue;
@@ -1169,7 +1183,8 @@ bool srxlEnterBind(uint8_t bindType, bool broadcast)
             srxlTryToBind(srxlBindInfo);
             if(broadcast)
             {
-                for(uint8_t b = 0; b < SRXL_NUM_OF_BUSES; ++b)
+                uint8_t b;
+                for(b = 0; b < SRXL_NUM_OF_BUSES; ++b)
                 {
                     srxlBus[b].txFlags.enterBind = 1;
                 }
@@ -1179,7 +1194,8 @@ bool srxlEnterBind(uint8_t bindType, bool broadcast)
 #endif // SRXL_INCLUDE_MASTER_CODE
 
         // Remote bind
-        for(uint8_t i = 0; i < SRXL_NUM_OF_BUSES; ++i)
+        uint8_t i;
+        for(i = 0; i < SRXL_NUM_OF_BUSES; ++i)
         {
             if((1u << i) & srxlRx.pBindRcvr->busBits)
             {
@@ -1221,7 +1237,8 @@ bool srxlSetBindInfo(uint8_t bindType, uint64_t guid, uint32_t uid)
 #endif
 
     // Broadcast this bind info on all SRXL buses
-    for(uint8_t b = 0; b < SRXL_NUM_OF_BUSES; ++b)
+    uint8_t b;
+    for(b = 0; b < SRXL_NUM_OF_BUSES; ++b)
     {
         srxlBus[b].txFlags.broadcastBindInfo = 1;
     }
@@ -1264,6 +1281,7 @@ void srxlOnFrameError(uint8_t busIndex)
                 pBus->baudRate = SRXL_BAUD_400000;
                 break;
             }
+            FALLTHROUGH;
             // else fall thru...
         }
         case SRXL_BAUD_400000:
@@ -1314,7 +1332,8 @@ bool srxlSetVtxData(SrxlVtxData* pVtxData)
     if(pVtxData->region != 0xFF)
         srxlVtxData.region = pVtxData->region;
 
-    for(uint8_t b = 0; b < SRXL_NUM_OF_BUSES; ++b)
+    uint8_t b;
+    for(b = 0; b < SRXL_NUM_OF_BUSES; ++b)
     {
         srxlBus[b].txFlags.sendVtxData = 1;
     }

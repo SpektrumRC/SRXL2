@@ -77,6 +77,7 @@ static const uint8_t SRXL_DEFAULT_ID_OF_TYPE[16] =
 };
 
 // Set SRXL_CRC_OPTIMIZE_MODE in spm_srxl_config.h to one of the following values
+#define SRXL_CRC_OPTIMIZE_EXTERNAL  (0)  // Uses an external function defined by SRXL_CRC_EXTERNAL_FN for CRC
 #define SRXL_CRC_OPTIMIZE_SPEED     (1)  // Uses table lookup for CRC computation (requires 512 const bytes for CRC table)
 #define SRXL_CRC_OPTIMIZE_SIZE      (2)  // Uses bitwise operations
 #define SRXL_CRC_OPTIMIZE_STM_HW    (3)  // Uses STM32 register-level hardware acceleration (only available on STM32F30x devices for now)
@@ -200,13 +201,16 @@ typedef enum
 
 // Enable byte packing for all structs defined here!
 #ifdef PACKED
-#error "preprocessor definition PACKED is already defined -- this could be bad"
-#endif
-#ifdef __GNUC__
+#define SRXL_EXTERNAL_PACKED
+#elif defined(__GNUC__)
 #define PACKED __attribute__((packed))
 #else
 #pragma pack(push, 1)
 #define PACKED
+#endif
+
+#ifndef FALLTHROUGH
+#define FALLTHROUGH
 #endif
 
 // Spektrum SRXL header
@@ -372,9 +376,11 @@ typedef union
 } PACKED SrxlFullID;
 
 // Restore packing back to default
+#ifndef SRXL_EXTERNAL_PACKED
 #undef PACKED
 #ifndef __GNUC__
 #pragma pack(pop)
+#endif
 #endif
 
 // Global vars
