@@ -31,6 +31,11 @@ SOFTWARE.
 
 // User included headers/declarations to access interface functions required below
 #include "uart.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void userProvidedFillSrxlTelemetry(SrxlTelemetryData* pTelemetry);
 void userProvidedReceivedChannelData(SrxlChannelData* pChannelData);
 void userProvidedHandleVtxData(SrxlVtxData* pVtxData);
@@ -157,5 +162,9 @@ static inline void srxlEnterCriticalSection(void)
 static inline void srxlExitCriticalSection(void)
 {
 }
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
 
 #endif // _SRXL_CONFIG_H_

@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2019 Horizon Hobby, LLC
+Copyright (c) 2019-2020 Horizon Hobby, LLC
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -52,6 +52,7 @@ typedef enum
     SrxlDevType_SRXLServo1          = 6,
     SrxlDevType_SRXLServo2          = 7,
     SrxlDevType_VTX                 = 8,
+    SrxlDevType_ExtRF               = 9,
     SrxlDevType_Broadcast           = 15
 } SrxlDevType;
 
@@ -67,7 +68,7 @@ static const uint8_t SRXL_DEFAULT_ID_OF_TYPE[16] =
     [SrxlDevType_SRXLServo1]        = 0x60,
     [SrxlDevType_SRXLServo2]        = 0x70,
     [SrxlDevType_VTX]               = 0x81,
-    [9]                             = 0xFF,
+    [SrxlDevType_ExtRF]             = 0x90,
     [10]                            = 0xFF,
     [11]                            = 0xFF,
     [12]                            = 0xFF,
@@ -153,6 +154,9 @@ typedef enum
 #define SRXL_CTRL_CMD_VTX           (0x02)
 #define SRXL_CTRL_CMD_FWDPGM        (0x03)
 
+//      X.X Spektrum Internal Use
+#define SRXL_SPM_INTERNAL       (0x99)
+
 typedef enum
 {
     SRXL_CMD_NONE,
@@ -164,9 +168,10 @@ typedef enum
     SRXL_CMD_HANDSHAKE,
     SRXL_CMD_TELEMETRY,
     SRXL_CMD_ENTER_BIND,
-    SRXL_CMD_REQ_BIND,
+    SRXL_CMD_REQ_BIND_INFO,
     SRXL_CMD_SET_BIND,
     SRXL_CMD_BIND_INFO,
+    SRXL_CMD_INTERNAL,
 } SRXL_CMD;
 
 // VTX Band
@@ -314,7 +319,8 @@ typedef struct SrxlVtxData
 // Forward Programming Data
 typedef struct SrxlFwdPgmData
 {
-    uint8_t rfu[3];     // 0 for now -- used to word-align data
+    int8_t  rssi;       // Best RSSI while sending forward programming data
+    uint8_t rfu[2];     // 0 for now -- used to word-align data
     uint8_t data[FWD_PGM_MAX_DATA_SIZE];
 } PACKED SrxlFwdPgmData;
 
@@ -347,6 +353,22 @@ typedef struct SrxlControlPacket
 //  uint16_t        crc;    // NOTE: Since this packet is variable-length, we can't use this value anyway
 } PACKED SrxlControlPacket;
 
+// Spektrum Internal test
+typedef struct SrxlInternalData
+{
+    uint8_t     srcDevID;
+    uint8_t     destDevID;
+    uint8_t     test;
+    uint32_t    key;
+} PACKED SrxlInternalData;
+
+typedef struct SrxlInternalPacket
+{
+    SrxlHeader        hdr;
+    SrxlInternalData  payload;
+//  uint16_t          crc;    // NOTE: Since this packet is variable-length, we can't use this value anyway
+} PACKED SrxlInternalPacket;
+
 // SRXL Packets
 typedef union
 {
@@ -356,6 +378,7 @@ typedef union
     SrxlTelemetryPacket telemetry;
     SrxlRssiPacket      rssi;
     SrxlParamPacket     parameter;
+    SrxlInternalPacket  internal;
     SrxlControlPacket   control;
     uint8_t             raw[SRXL_MAX_BUFFER_SIZE];
 } SrxlPacket;
@@ -383,7 +406,17 @@ extern SrxlTelemetryData srxlTelemData;
 extern SrxlVtxData srxlVtxData;
 
 // Include config here, after all typedefs that might be needed within it
+// NOTE: Disable C linkage first to allow Cpp headers to be included within the config before re-enabling C linkage within
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
 #include "spm_srxl_config.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 #if !defined(SRXL_NUM_OF_BUSES)
 #error "SRXL_NUM_OF_BUSES must be defined in spm_srxl_config.h!"
@@ -416,6 +449,8 @@ typedef enum
     SrxlState_SendEnterBind,
     SrxlState_SendBoundDataReport,
     SrxlState_SendSetBindInfo,
+    SrxlState_RequestBindInfo,
+    SrxlState_SendInternal,
 } SrxlState;
 
 //#ifdef SRXL_IS_HUB
@@ -471,6 +506,7 @@ typedef struct SrxlTxFlags
     unsigned int reportBindInfo : 1;
     unsigned int sendVtxData : 1;
     unsigned int sendFwdPgmData : 1;
+    unsigned int sendInternal : 1;
 } SrxlTxFlags;
 
 typedef struct SrxlBus
@@ -518,6 +554,7 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t *packet, uint8_t length);
 void srxlRun(uint8_t busIndex, int16_t timeoutDelta_ms);
 bool srxlEnterBind(uint8_t bindType, bool broadcast);
 bool srxlSetBindInfo(uint8_t bindType, uint64_t guid, uint32_t uid);
+bool srxlRequestBindInfo(uint8_t busIndex, uint8_t destDevID);
 void srxlOnFrameError(uint8_t busIndex);
 SrxlFullID srxlGetTelemetryEndpoint(void);
 bool srxlSetVtxData(SrxlVtxData *pVtxData);
@@ -525,6 +562,7 @@ bool srxlPassThruFwdPgm(uint8_t *pData, uint8_t length);
 void srxlSetHoldThreshold(uint8_t countdownReset);
 void srxlClearCommStats(void);
 bool srxlUpdateCommStats(bool isFade);
+void srxlSendInternalData(uint8_t busIndex, uint8_t destDevID, uint8_t cmd);
 
 #ifdef __cplusplus
 } // extern "C"
