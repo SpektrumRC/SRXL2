@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2019-2020 Horizon Hobby, LLC
+Copyright (c) 2019-2021 Horizon Hobby, LLC
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -235,6 +235,7 @@ static inline SrxlRcvrEntry* srxlAddReceiverEntry(SrxlBus* pBus, SrxlDevEntry de
         pRcvr->deviceID = devEntry.deviceID;
         pRcvr->busBits = (1u << pBus->fullID.busIndex);
         pRcvr->info = devEntry.info;
+        pRcvr->fades = 0xFFFF;
 
         // If this receiver is full-range, insert into our sorted list after the other full-range telemetry receivers
         if(pRcvr->info & SRXL_DEVINFO_TELEM_FULL_RANGE)
@@ -507,7 +508,7 @@ void srxlSend(SrxlBus* pBus, SRXL_CMD srxlCmd, uint8_t replyID)
             pBus->srxlOut.control.payload.cmd = SRXL_CTRL_CMD_CHANNEL;
             pBus->srxlOut.control.payload.replyID = replyID;
 
-            channelMask = srxlChData.mask;
+            channelMask = pBus->channelOutMask;
         }
         else // == SRXL_CMD_CHANNEL_FS
         {
@@ -539,7 +540,10 @@ void srxlSend(SrxlBus* pBus, SRXL_CMD srxlCmd, uint8_t replyID)
         // Set bits in packet for channels we populated, and clear those mask bits if it was part of a normal channel data command
         pBus->srxlOut.control.payload.channelData.mask = channelMask;
         if(srxlCmd == SRXL_CMD_CHANNEL)
+        {
             srxlChData.mask &= ~channelMask;
+            pBus->channelOutMask &= ~channelMask;
+        }
 
         pBus->srxlOut.header.length = SRXL_CTRL_BASE_LENGTH + 7 + (2 * channelIndex);
     }
@@ -969,8 +973,7 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
             {
                 srxlBindInfo = pBindInfo->data;
 #ifdef SRXL_INCLUDE_MASTER_CODE
-                //if(pBus->fullID.deviceID < 0x30)
-                    srxlTryToBind(srxlBindInfo);
+                srxlTryToBind(srxlBindInfo);
 #endif
             }
         }
@@ -1209,7 +1212,7 @@ bool srxlEnterBind(uint8_t bindType, bool broadcast)
     {
 #ifdef SRXL_INCLUDE_MASTER_CODE
         // Local bind
-        if(srxlRx.pBindRcvr == srxlThisDev.pRcvr)
+        if(srxlRx.pBindRcvr && (srxlRx.pBindRcvr == srxlThisDev.pRcvr))
         {
             srxlBindInfo.type = bindType;
             srxlBindInfo.options = SRXL_BIND_OPT_BIND_TX_ENABLE;
@@ -1224,7 +1227,7 @@ bool srxlEnterBind(uint8_t bindType, bool broadcast)
         // Remote bind
         for(uint8_t i = 0; i < SRXL_NUM_OF_BUSES; ++i)
         {
-            if(((1u << i) & srxlRx.pBindRcvr->busBits) || broadcast)
+            if(broadcast || ((1u << i) & srxlRx.pBindRcvr->busBits))
             {
                 srxlBus[i].txFlags.enterBind = 1;
                 if(!broadcast)
@@ -1496,3 +1499,4 @@ void srxlSendInternalData(uint8_t busIndex, uint8_t destDevID, uint8_t cmd)
     }
 }
 #endif //SRXL_ENABLE_INTERNAL
+

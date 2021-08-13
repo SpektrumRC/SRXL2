@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2019-2020 Horizon Hobby, LLC
+Copyright (c) 2019-2021 Horizon Hobby, LLC
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -530,6 +530,7 @@ typedef struct SrxlBus
     SrxlTxFlags     txFlags;            // Pending outgoing packet types
     uint8_t         uart;               // Index number of UART tied to this SRXL bus
     SrxlRcvrEntry*  pMasterRcvr;        // Receiver entry for the bus master, if one exists
+    uint32_t        channelOutMask;     // Mask for channels to be sent on master buses
     bool            master;             // True if this device is the bus master on this bus
     bool            initialized;        // True when this SRXL bus is initialized
 } SrxlBus;
