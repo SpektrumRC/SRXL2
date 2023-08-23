@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2019-2021 Horizon Hobby, LLC
+Copyright (c) 2019-2023 Horizon Hobby, LLC
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -427,7 +427,7 @@ bool srxlInitBus(uint8_t busIndex, uint8_t uart, uint8_t baudSupported)
     pBus->fullID.busIndex = busIndex;
     pBus->rxDevCount = 0;
     pBus->rxDevPrioritySum = 0;
-    pBus->requestID = (srxlThisDev.devEntry.deviceID == 0x10) ? 0x11 : 0;
+    pBus->requestID = (srxlThisDev.devEntry.deviceID == 0x10) ? 0x10 : 0;
     pBus->baudSupported = baudSupported;
     pBus->baudRate = SRXL_BAUD_115200;
     pBus->frameErrCount = 0;
@@ -435,6 +435,7 @@ bool srxlInitBus(uint8_t busIndex, uint8_t uart, uint8_t baudSupported)
     // Default remote receiver is automatically master -- everyone else figures it out during handshake
     pBus->master = (srxlThisDev.devEntry.deviceID == 0x10);
     pBus->pMasterRcvr = (srxlThisDev.devEntry.deviceID == 0x10) ? &srxlRx.rcvr[0] : 0;
+    pBus->pollOnceMore = true;
     pBus->initialized = true;
 
     return true;
@@ -605,7 +606,7 @@ void srxlSend(SrxlBus* pBus, SRXL_CMD srxlCmd, uint8_t replyID)
         if(srxlRx.pTelemRcvr && (pBus->srxlOut.telemetry.destDevID == srxlRx.pTelemRcvr->deviceID))
         {
             // Don't mark telemetry as having been sent if we are sending it ourself over RF
-            if(pBus->srxlOut.telemetry.destDevID != srxlThisDev.pRcvr->deviceID)
+            if(!srxlThisDev.pRcvr || pBus->srxlOut.telemetry.destDevID != srxlThisDev.pRcvr->deviceID)
             {
                 srxlTelemetrySent();
                 // Clear telemetry buffer after sending so we don't repeatedly display old data
@@ -747,7 +748,7 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
         }
 #endif
         // Channel Data or Failsafe Data
-        else
+        else if(pCtrlData->cmd == SRXL_CTRL_CMD_CHANNEL || pCtrlData->cmd == SRXL_CTRL_CMD_CHANNEL_FS)
         {
             bool isFailsafe = (pCtrlData->cmd == SRXL_CTRL_CMD_CHANNEL_FS);
             srxlChData.rssi = pCtrlData->channelData.rssi;
@@ -787,6 +788,9 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
                         srxlChData.mask |= channelMaskBit;
                     }
                 }
+#ifdef SRXL_INCLUDE_MASTER_CODE
+                srxlSetOutgoingChannelMask(srxlChData.mask);
+#endif
             }
 
             srxlChDataIsFailsafe = isFailsafe;  // TODO: Can we still assume this???
@@ -839,24 +843,73 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
         if(length < sizeof(SrxlHandshakePacket))
             return false;
 
-        // If this is an unprompted handshake (dest == 0) from a higher device ID, then we're the master
         SrxlHandshakeData* pHandshake = &(pRx->handshake.payload);
-        if((pHandshake->destDevID == 0) && (pHandshake->srcDevID > pBus->fullID.deviceID))
+
+        // If this is an unprompted handshake (dest == 0)
+        if(pHandshake->destDevID == 0)
         {
-            // Send a reply immediately to get the slave to shut up
-            pBus->state = SrxlState_SendHandshake;
-            pBus->requestID = pHandshake->srcDevID;
-            pBus->baudSupported = SRXL_SUPPORTED_BAUD_RATES;
-            srxlRun(busIndex, 0);
-            pBus->requestID = pBus->fullID.deviceID;
-            pBus->state = SrxlState_SendHandshake;
-            pBus->master = true;
-            pBus->pMasterRcvr = srxlThisDev.pRcvr;
+            // If we were already running, the device probably browned out and didn't properly listen for 50ms on startup
+            if(pBus->state >= SrxlState_Running)
+            {
+#ifdef SRXL_INCLUDE_MASTER_CODE
+                // If we're already the master then just send the final handshake again
+                if(pBus->master)
+                {
+                    pBus->requestID = 0xFF;
+                    pBus->state = SrxlState_SendHandshake;
+                }
+#endif
+            }
+            // Else we're handshaking
+            else
+            {
+                // If there is a lower device ID on the bus, we're not the master, so just listen
+                if(pHandshake->srcDevID < pBus->fullID.deviceID)
+                {
+                    pBus->master = false;
+                    pBus->state = SrxlState_ListenForHandshake;
+                }
+#ifdef SRXL_INCLUDE_MASTER_CODE
+                // Else if it's from a higher device ID
+                else if(pHandshake->srcDevID > pBus->fullID.deviceID)
+                {
+                    // Make sure we haven't already seen another device who should be the master
+                    uint8_t i;
+                    for(i = 0; i < pBus->rxDevCount; ++i)
+                    {
+                        if(pBus->rxDev[i].deviceID < pBus->fullID.deviceID)
+                            break;
+                    }
+                    if(i == pBus->rxDevCount)
+                    {
+                        // We should be the master, so send a reply immediately to get them to shut up
+                        pBus->state = SrxlState_SendHandshake;
+                        pBus->requestID = pHandshake->srcDevID;
+                        pBus->baudSupported = SRXL_SUPPORTED_BAUD_RATES;
+                        srxlRun(busIndex, 0);
+
+                        // Then take on role of master and start the handshake process
+                        pBus->requestID = pBus->fullID.deviceID;
+                        pBus->state = SrxlState_SendHandshake;
+                        pBus->master = true;
+                        pBus->pMasterRcvr = srxlThisDev.pRcvr;
+                    }
+                }
+#endif
+            }
         }
 
         // Add this device to our list of discovered devices
         SrxlDevEntry newDev = {.deviceID = pHandshake->srcDevID, .priority = pHandshake->priority, .info = pHandshake->info};
         SrxlDevEntry* pDev = srxlAddDeviceEntry(pBus, newDev);
+
+#ifdef SRXL_INCLUDE_MASTER_CODE
+        // Stand down if we just got outranked by a new master
+        if(pBus->master && pHandshake->srcDevID >= 0x10 && pHandshake->srcDevID < pBus->fullID.deviceID)
+        {
+            pBus->master = false;
+            pBus->state = SrxlState_ListenForHandshake;
+        }
 
         // Bus master needs to track responses and poll next device
         if(pBus->master)
@@ -867,8 +920,10 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
             // Make sure the state machine is set to poll -- this will eventually reach broadcast address (0xFF)
             pBus->state = SrxlState_SendHandshake;
         }
+        else
+#endif
         // Broadcast handshake sets the agreed upon baud rate for this bus
-        else if(pHandshake->destDevID == 0xFF)
+        if(pHandshake->destDevID == 0xFF)
         {
             // Get bus master receiver entry (if it's a flight controller, add it now as a receiver on this bus)
             if(newDev.deviceID >= 0x30 && newDev.deviceID < 0x40)
@@ -891,6 +946,7 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
         // Normal Handshake destined for this device should be replied to -- else ignore
         else
         {
+            // Only send a reply if we didn't just send the unprompted handshake to the master that requested this handshake
             if(pHandshake->destDevID == pBus->fullID.deviceID && pBus->state != SrxlState_SendHandshake)
             {
                 pBus->requestID = pHandshake->srcDevID;
@@ -1007,7 +1063,7 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
                 srxlRx.pTelemRcvr = srxlChooseTelemRcvr();
             }
 #else
-            srxlRx.pTelemRcvr = srxlThisDev.pRcvr;
+            srxlRx.pTelemRcvr = pBus->pMasterRcvr;
 #endif
             // Enable this device's telemetry tx based on whether we are the chosen telemetry receiver
 #ifdef SRXL_INCLUDE_MASTER_CODE
@@ -1015,7 +1071,7 @@ bool srxlParsePacket(uint8_t busIndex, uint8_t* packet, uint8_t length)
 #endif
         }
         // Else turn off our telemetry and that of any receivers we might reply to via our own telemetry
-        else
+        else if(pBus->master)
         {
             srxlRx.pTelemRcvr = 0;
 #ifdef SRXL_INCLUDE_MASTER_CODE

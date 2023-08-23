@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2019-2021 Horizon Hobby, LLC
+Copyright (c) 2019-2023 Horizon Hobby, LLC
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -53,28 +53,30 @@ typedef enum
     SrxlDevType_SRXLServo2          = 7,
     SrxlDevType_VTX                 = 8,
     SrxlDevType_ExtRF               = 9,
+    SrxlDevType_RemoteId            = 10,
+    SrxlDevType_Sensor              = 11,
     SrxlDevType_Broadcast           = 15
 } SrxlDevType;
 
 // Default device ID list used by master when polling
 static const uint8_t SRXL_DEFAULT_ID_OF_TYPE[16] =
 {
-    [SrxlDevType_None]              = 0x00,
-    [SrxlDevType_RemoteReceiver]    = 0x10,
-    [SrxlDevType_Receiver]          = 0x21,
-    [SrxlDevType_FlightController]  = 0x30,
-    [SrxlDevType_ESC]               = 0x40,
-    [5]                             = 0x60,
-    [SrxlDevType_SRXLServo1]        = 0x60,
-    [SrxlDevType_SRXLServo2]        = 0x70,
-    [SrxlDevType_VTX]               = 0x81,
-    [SrxlDevType_ExtRF]             = 0x90,
-    [10]                            = 0xFF,
-    [11]                            = 0xFF,
-    [12]                            = 0xFF,
-    [13]                            = 0xFF,
-    [14]                            = 0xFF,
-    [SrxlDevType_Broadcast]         = 0xFF,
+    0x00,  // SrxlDevType_None
+    0x10,  // SrxlDevType_RemoteReceiver
+    0x21,  // SrxlDevType_Receiver
+    0x30,  // SrxlDevType_FlightController
+    0x40,  // SrxlDevType_ESC
+    0x60,  // 5
+    0x60,  // SrxlDevType_SRXLServo1
+    0x70,  // SrxlDevType_SRXLServo2
+    0x81,  // SrxlDevType_VTX
+    0x90,  // SrxlDevType_ExtRF
+    0xA0,  // SrxlDevType_RemoteId
+    0xB0,  // SrxlDevType_Sensor
+    0xFF,  // 12
+    0xFF,  // 13
+    0xFF,  // 14
+    0xFF,  // SrxlDevType_Broadcast
 };
 
 // Set SRXL_CRC_OPTIMIZE_MODE in spm_srxl_config.h to one of the following values
@@ -532,6 +534,7 @@ typedef struct SrxlBus
     SrxlRcvrEntry*  pMasterRcvr;        // Receiver entry for the bus master, if one exists
     uint32_t        channelOutMask;     // Mask for channels to be sent on master buses
     bool            master;             // True if this device is the bus master on this bus
+    bool            pollOnceMore;       // True if this bus master should poll all devices once more
     bool            initialized;        // True when this SRXL bus is initialized
 } SrxlBus;
 
